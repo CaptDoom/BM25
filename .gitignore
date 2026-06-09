@@ -1,0 +1,25 @@
+# Python bytecode & cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Datasets and Large Binary Index Files
+*.db
+*.joblib
+*.npy
+*.npz
+metadata/
+images/
+
+# Streamlit & local cache
+.streamlit/
+.cache/
+logs/

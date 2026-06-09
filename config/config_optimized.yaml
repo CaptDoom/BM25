@@ -1,0 +1,72 @@
+# AuraAI - Configuration File
+# Tunable parameters for BM25 and search pipeline
+
+# ============================================================================
+# DATASET CONFIGURATION
+# ============================================================================
+dataset_name: "BeIR/scidocs"  # Default dataset: BeIR/scidocs, BeIR/fever, BeIR/fiqa, BeIR/quora
+
+# ============================================================================
+# BM25 RETRIEVAL PARAMETERS
+# ============================================================================
+bm25:
+  k1: 1.5                    # Term frequency saturation parameter
+  b: 0.75                    # Length normalization parameter
+  top_k: 100                 # Number of candidates for reranking
+  title_boost: 2.0          # Boost weight for title field (faster matching)
+  
+# ============================================================================
+# QUERY PREPROCESSING
+# ============================================================================
+preprocessing:
+  lowercase: true           # Convert to lowercase (required for performance)
+  remove_punctuation: true  # Remove punctuation for cleaner matching
+  remove_stopwords: true    # Remove common stopwords (improves precision)
+  stemming: false           # Enable Porter stemming (slower but more accurate)
+  
+# ============================================================================
+# SPELL CORRECTION
+# ============================================================================
+spell_correction:
+  enabled: true
+  min_similarity: 0.85      # Minimum similarity threshold for fuzzy matching
+  max_terms_to_correct: 10  # Limit terms to check for speed
+  
+# ============================================================================
+# RERANKER CONFIGURATION
+# ============================================================================
+reranker:
+  model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Fast & accurate reranker
+  batch_size: 32            # Batch size for GPU inference
+  top_k: 10                 # Final number of results to return
+  device: "cpu"             # Use "cuda" if GPU available
+  
+# ============================================================================
+# SHARDING CONFIGURATION (for large datasets)
+# ============================================================================
+sharding:
+  shard_size: 1000000       # Documents per shard for memory efficiency
+  max_shards: 10            # Maximum number of shards
+  
+# ============================================================================
+# PERFORMANCE TUNING
+# ============================================================================
+performance:
+  cache_indexes: true       # Cache loaded indexes in memory
+  use_memory_mapping: true  # Memory-map large files (faster loading)
+  parallel_search: true     # Enable multi-threaded search
+  num_workers: 4            # Number of worker threads
+  
+# ============================================================================
+# METADATA FILTERING
+# ============================================================================
+metadata:
+  enable_filtering: true    # Allow metadata-based filtering
+  supported_operators: ["==", "!=", ">", "<", ">=", "<="]
+  
+# ============================================================================
+# LOGGING
+# ============================================================================
+logging:
+  level: "warning"          # Log level: debug, info, warning, error
+  log_search_queries: false # Log search queries for privacy

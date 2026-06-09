@@ -1,0 +1,39 @@
+dataset_name: "BeIR/scidocs"  # Default dataset: BeIR/scidocs, BeIR/fever, BeIR/fiqa, BeIR/quora
+
+preprocessing:
+  lowercase: true
+  remove_punctuation: true
+  remove_stopwords: true
+  use_lemmatization: false
+
+spell_correction:
+  min_similarity: 0.85
+
+bm25:
+  k1: 1.2
+  b: 0.55
+  top_k: 25
+  # Adaptive tuning: automatically adjusted based on corpus size during indexing
+  # Small corpus (< 1k docs): k1=1.2
+  # Large corpus (> 1M docs): k1=2.0
+
+dense:
+  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  top_k: 100
+
+rrf:
+  k: 60
+  weights:
+    bm25: 1.0
+    dense: 1.0
+
+reranker:
+  model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  top_n: 15
+  top_k: 10
+  batch_size: 32
+
+sharding:
+  shard_size: 1000000
+
+cache_dir: "./.cache"
