@@ -1,9 +1,14 @@
 import os
+import sys
 import json
 import time
 import warnings
 import streamlit as st
 from datetime import datetime
+
+# Add parent directory to python path to resolve src imports on Streamlit Cloud
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from src.pipeline import RetrievalPipeline
 
 warnings.filterwarnings('ignore')
