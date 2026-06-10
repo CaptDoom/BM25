@@ -19,6 +19,12 @@ ENV/
 metadata/
 images/
 
+# Exceptions for pre-built indexes
+!src/index/BeIR_scidocs/**
+!src/index/BeIR_fiqa/**
+!src/index/BeIR_quora/**
+
+
 # Streamlit & local cache
 .streamlit/
 .cache/

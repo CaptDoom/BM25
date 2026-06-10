@@ -37,3 +37,7 @@ sharding:
   shard_size: 1000000
 
 cache_dir: "./.cache"
+
+huggingface:
+  repo_id: "CaptDoom/auraai-indexes"
+
