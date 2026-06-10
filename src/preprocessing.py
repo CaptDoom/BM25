@@ -66,7 +66,7 @@ class QueryPreprocessor:
         self.vocab = set(vocab)
         self.vocab_list = list(self.vocab)
         
-    def clean_query(self, query):
+    def clean_query(self, query, correct_spelling=False):
         if not query:
             return ""
             
@@ -86,7 +86,11 @@ class QueryPreprocessor:
         
         # Tokenize
         words = self.tokenize_text(query)
-        return " ".join(words)
+        cleaned = " ".join(words)
+        
+        if correct_spelling:
+            return self.correct_spelling(cleaned)
+        return cleaned
 
     def tokenize_text(self, text, lowercase=True, remove_punctuation=True, remove_stopwords=True, use_lemmatization=False):
         return tokenize_text(text, lowercase, remove_punctuation, remove_stopwords, use_lemmatization)

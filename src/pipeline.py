@@ -1,6 +1,7 @@
 import os
 import yaml
 import gc
+from functools import lru_cache
 from src.preprocessing import QueryPreprocessor, parse_filter
 from src.retrievers.bm25 import ShardedBM25
 from src.reranker import CrossEncoderReranker
@@ -21,7 +22,7 @@ class RetrievalPipeline:
         self.bm25_retriever = ShardedBM25(
             index_dir=os.path.join(index_dir, "bm25"),
             shard_size=self.config.get("sharding", {}).get("shard_size", 1000000),
-            k1=bm25_cfg.get("k1", 1.5),
+            k1=bm25_cfg.get("k1", 1.2),
             b=bm25_cfg.get("b", 0.75)
         )
         
@@ -42,10 +43,12 @@ class RetrievalPipeline:
             for shard in self.bm25_retriever.shards:
                 vocab.update(shard.vocab.keys())
             self.preprocessor.set_vocab(vocab)
+            self.search.cache_clear()  # Clear query cache when loading
             self.loaded = True
             print("Pipeline indexes loaded successfully.")
             
-    def search(self, query, metadata_filter=None, top_k=10):
+    @lru_cache(maxsize=1024)
+    def search(self, query, metadata_filter=None, top_k=10, use_reranker=False, correct_spelling=False):
         try:
             self.load_indexes()
             
@@ -65,9 +68,8 @@ class RetrievalPipeline:
             if not query or not query.strip():
                 return []
                 
-            cleaned_query = self.preprocessor.clean_query(query)
-            corrected_query = self.preprocessor.correct_spelling(cleaned_query)
-            print(f"Raw query: '{query}' -> Cleaned: '{cleaned_query}' -> Corrected: '{corrected_query}'")
+            corrected_query = self.preprocessor.clean_query(query, correct_spelling=correct_spelling)
+            print(f"Raw query: '{query}' -> Preprocessed: '{corrected_query}'")
             
             if not corrected_query or not corrected_query.strip():
                 # Try with original query if all words were stopwords
@@ -78,32 +80,32 @@ class RetrievalPipeline:
             bm25_k = self.config.get("bm25", {}).get("top_k", 100)
             bm25_results = self.bm25_retriever.search(corrected_query.split(), top_k=bm25_k, doc_mask=doc_mask)
             
-            # Fallback strategies
+            # Fallback strategy
             if not bm25_results:
-                if corrected_query != cleaned_query:
-                    print("📍 No results with corrected query, trying cleaned query...")
-                    bm25_results = self.bm25_retriever.search(cleaned_query.split(), top_k=bm25_k, doc_mask=doc_mask)
-                
-                if not bm25_results:
-                    print("📍 No results with cleaned query, trying raw query...")
-                    bm25_results = self.bm25_retriever.search(query.lower().split()[:10], top_k=bm25_k, doc_mask=doc_mask)
+                raw_tokens = query.lower().split()[:10]
+                print(f"📍 No results with preprocessed query, trying raw tokens: {raw_tokens}...")
+                bm25_results = self.bm25_retriever.search(raw_tokens, top_k=bm25_k, doc_mask=doc_mask)
             
             if not bm25_results:
                 print("❌ No documents found matching the query.")
                 return []
             
             # Reranking with error handling
-            try:
-                rerank_depth = self.config.get("reranker", {}).get("top_n", 25)
-                bm25_candidates = bm25_results[:rerank_depth]
-                reranked_results = self.reranker.rerank(
-                    query=corrected_query,
-                    candidates=bm25_candidates,
-                    corpus_db_helper=self.db_helper,
-                    top_k=top_k
-                )
-            except Exception as rerank_err:
-                print(f"⚠️ Reranking failed: {rerank_err}. Using BM25 results.")
+            reranked_results = None
+            if use_reranker:
+                try:
+                    rerank_depth = self.config.get("reranker", {}).get("top_n", 25)
+                    bm25_candidates = bm25_results[:rerank_depth]
+                    reranked_results = self.reranker.rerank(
+                        query=corrected_query,
+                        candidates=bm25_candidates,
+                        corpus_db_helper=self.db_helper,
+                        top_k=top_k
+                    )
+                except Exception as rerank_err:
+                    print(f"⚠️ Reranking failed: {rerank_err}. Using BM25 results.")
+                    reranked_results = bm25_results[:top_k]
+            else:
                 reranked_results = bm25_results[:top_k]
             
             final_doc_ids = [doc_id for doc_id, _ in reranked_results]

@@ -1,4 +1,4 @@
-dataset_name: "BeIR/scidocs"  # Default dataset: BeIR/scidocs, BeIR/fever, BeIR/fiqa, BeIR/quora
+dataset_name: "BeIR/scidocs"  # Default dataset: BeIR/scidocs, BeIR/fever, BeIR/fiqa, BeIR/quora, BeIR/cqadupstack
 
 preprocessing:
   lowercase: true
@@ -11,11 +11,8 @@ spell_correction:
 
 bm25:
   k1: 1.2
-  b: 0.55
+  b: 0.75
   top_k: 25
-  # Adaptive tuning: automatically adjusted based on corpus size during indexing
-  # Small corpus (< 1k docs): k1=1.2
-  # Large corpus (> 1M docs): k1=2.0
 
 dense:
   model_name: "sentence-transformers/all-MiniLM-L6-v2"
@@ -40,4 +37,3 @@ cache_dir: "./.cache"
 
 huggingface:
   repo_id: "CaptDoom/auraai-indexes"
-

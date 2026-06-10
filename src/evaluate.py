@@ -25,7 +25,7 @@ def build_index(dataset_name, config_path, index_dir):
     for i in range(0, num_docs, batch_size):
         end_idx = min(i + batch_size, num_docs)
         batch_docs = get_batch_docs(corpus, i, end_idx)
-        db_helper.insert_documents(batch_docs)
+        db_helper.insert_documents(batch_docs, start_idx=i)
         print(f"Inserted documents {i} to {end_idx}...")
         
     with open(config_path, "r") as f:
@@ -36,7 +36,7 @@ def build_index(dataset_name, config_path, index_dir):
     bm25_retriever = ShardedBM25(
         index_dir=os.path.join(index_dir, "bm25"),
         shard_size=config.get("sharding", {}).get("shard_size", 1000000),
-        k1=bm25_cfg.get("k1", 1.5),
+        k1=bm25_cfg.get("k1", 1.2),
         b=bm25_cfg.get("b", 0.75)
     )
     bm25_retriever.index(corpus)
@@ -91,7 +91,7 @@ def run_evaluation(pipeline, dataset_name):
     precisions_5, recalls_5, ndcgs_5 = [], [], []
     precisions_10, recalls_10, ndcgs_10 = [], [], []
     
-    # Evaluate top 100 queries to speed up execution if dataset is massive (e.g. MS MARCO)
+    # Evaluate top 100 queries to speed up execution
     limit = 100 if len(eval_queries) > 100 else len(eval_queries)
     print(f"Running evaluation on top {limit} queries...")
     
@@ -101,7 +101,7 @@ def run_evaluation(pipeline, dataset_name):
         q_text = q["text"]
         
         rel_docs = qrels_dict[q_id]
-        results = pipeline.search(q_text, top_k=10)
+        results = pipeline.search(q_text, top_k=10, use_reranker=True)
         retrieved_ids = [doc["id"] for doc in results]
         
         # Metrics @ 5

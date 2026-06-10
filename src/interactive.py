@@ -37,7 +37,8 @@ def main():
             filter_str = input("Enter metadata filter (or press Enter for none, e.g. year == 2020): ").strip()
             filter_str = filter_str if filter_str else None
             
-            results = pipeline.search(query, metadata_filter=filter_str, top_k=5)
+            # Sub-100ms real-time search: disable reranker and spell-check
+            results = pipeline.search(query, metadata_filter=filter_str, top_k=5, use_reranker=False, correct_spelling=False)
             
             if not results:
                 print("No documents retrieved.")
@@ -45,7 +46,7 @@ def main():
                 
             print(f"\nTop results for '{query}':")
             for idx, doc in enumerate(results):
-                print(f"{idx+1}. ID: {doc['id']} (Reranked Score: {doc['score']:.4f})")
+                print(f"{idx+1}. ID: {doc['id']} (Score: {doc['score']:.4f})")
                 print(f"   Title: {doc['title']}")
                 print(f"   Text:  {doc['text']}")
                 print(f"   Meta:  {doc['metadata']}\n")

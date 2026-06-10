@@ -9,21 +9,35 @@ class DataLoader:
         
     def load_corpus(self):
         print(f"Loading corpus for {self.dataset_name}...")
-        if self.dataset_name.startswith("BeIR/"):
+        if self.dataset_name == "BeIR/cqadupstack":
+            return load_dataset(self.dataset_name, "english", split="corpus")
+        elif self.dataset_name.startswith("BeIR/"):
             return load_dataset(self.dataset_name, "corpus", split="corpus")
         else:
             return load_dataset(self.dataset_name, split="train")
 
     def load_queries(self):
         print(f"Loading queries for {self.dataset_name}...")
-        if self.dataset_name.startswith("BeIR/"):
+        if self.dataset_name == "BeIR/cqadupstack":
+            return load_dataset(self.dataset_name, "english", split="queries")
+        elif self.dataset_name.startswith("BeIR/"):
             return load_dataset(self.dataset_name, "queries", split="queries")
         else:
             return load_dataset(self.dataset_name, split="queries")
 
     def load_qrels(self):
         print(f"Loading qrels for {self.dataset_name}...")
-        if self.dataset_name.startswith("BeIR/"):
+        if self.dataset_name == "BeIR/cqadupstack":
+            qrels_dataset_name = f"{self.dataset_name}-qrels"
+            for split in ["test", "validation", "dev", "train"]:
+                try:
+                    ds = load_dataset(qrels_dataset_name, split=split)
+                    print(f"Loaded qrels split '{split}' from {qrels_dataset_name}")
+                    return ds
+                except Exception:
+                    continue
+            raise ValueError(f"Could not find qrels split for {qrels_dataset_name}")
+        elif self.dataset_name.startswith("BeIR/"):
             qrels_dataset_name = f"{self.dataset_name}-qrels"
             for split in ["test", "validation", "dev", "train"]:
                 try:
@@ -39,6 +53,12 @@ class DataLoader:
 class CorpusDBHelper:
     def __init__(self, db_path):
         self.db_path = db_path
+        # Auto-create tables/indexes and migrate old databases on initialization
+        if os.path.exists(self.db_path):
+            try:
+                self.create_indexes_if_missing()
+            except Exception as e:
+                print(f"⚠️ Error creating indexes on load: {e}")
         
     def init_db(self):
         conn = sqlite3.connect(self.db_path)
@@ -46,25 +66,47 @@ class CorpusDBHelper:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS documents (
                 doc_id TEXT PRIMARY KEY,
+                doc_index INTEGER,
                 title TEXT,
                 text TEXT,
                 metadata TEXT
             )
         """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_doc_index ON documents (doc_index)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_metadata_year ON documents(json_extract(metadata, '$.year'))")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_metadata_category ON documents(json_extract(metadata, '$.category'))")
         conn.commit()
         conn.close()
         
-    def insert_documents(self, documents):
+    def create_indexes_if_missing(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Check if doc_index column exists
+        cursor.execute("PRAGMA table_info(documents)")
+        cols = [info[1] for info in cursor.fetchall()]
+        if "doc_index" not in cols:
+            print("Migrating SQLite schema: adding doc_index column...")
+            cursor.execute("ALTER TABLE documents ADD COLUMN doc_index INTEGER")
+            cursor.execute("UPDATE documents SET doc_index = rowid - 1")
+            
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_doc_index ON documents (doc_index)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_metadata_year ON documents(json_extract(metadata, '$.year'))")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_metadata_category ON documents(json_extract(metadata, '$.category'))")
+        conn.commit()
+        conn.close()
+        
+    def insert_documents(self, documents, start_idx=0):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         data = []
-        for doc in documents:
+        for idx, doc in enumerate(documents):
             meta_str = json.dumps(doc.get("metadata", {})) if "metadata" in doc else "{}"
-            data.append((doc["_id"], doc.get("title", ""), doc.get("text", ""), meta_str))
+            data.append((doc["_id"], start_idx + idx, doc.get("title", ""), doc.get("text", ""), meta_str))
             
         cursor.executemany("""
-            INSERT OR REPLACE INTO documents (doc_id, title, text, metadata)
-            VALUES (?, ?, ?, ?)
+            INSERT OR REPLACE INTO documents (doc_id, doc_index, title, text, metadata)
+            VALUES (?, ?, ?, ?, ?)
         """, data)
         conn.commit()
         conn.close()
@@ -97,32 +139,22 @@ class CorpusDBHelper:
         if not parsed_filter:
             return None
         field, op, val = parsed_filter
+        
+        sql_ops = {"==": "=", "!=": "!=", ">=": ">=", "<=": "<=", ">": ">", "<": "<"}
+        if op not in sql_ops:
+            return set()
+        sql_op = sql_ops[op]
+        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT doc_id, metadata FROM documents")
         
-        matching_ids = set()
-        
-        for doc_id, meta_str in cursor.fetchall():
-            try:
-                meta = json.loads(meta_str)
-            except Exception:
-                meta = {}
-            if field in meta:
-                doc_val = meta[field]
-                if op == "==" and doc_val == val:
-                    matching_ids.add(doc_id)
-                elif op == "!=" and doc_val != val:
-                    matching_ids.add(doc_id)
-                elif op == ">=" and doc_val >= val:
-                    matching_ids.add(doc_id)
-                elif op == "<=" and doc_val <= val:
-                    matching_ids.add(doc_id)
-                elif op == ">" and doc_val > val:
-                    matching_ids.add(doc_id)
-                elif op == "<" and doc_val < val:
-                    matching_ids.add(doc_id)
-                    
+        try:
+            query = f"SELECT doc_id FROM documents WHERE json_extract(metadata, '$.{field}') {sql_op} ?"
+            cursor.execute(query, (val,))
+            matching_ids = {row[0] for row in cursor.fetchall() if row[0] is not None}
+        except sqlite3.OperationalError:
+            matching_ids = set()
+            
         conn.close()
         return matching_ids
 

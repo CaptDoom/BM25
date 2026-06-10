@@ -6,7 +6,7 @@ import warnings
 import streamlit as st
 from datetime import datetime
 
-# Add parent directory to python path to resolve src imports on Streamlit Cloud
+# Add parent directory to python path to resolve src imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.pipeline import RetrievalPipeline
@@ -104,7 +104,7 @@ if 'search_history' not in st.session_state:
 if 'downloading' not in st.session_state:
     st.session_state.downloading = False
 
-# Custom premium styling using CSS - Optimized for speed
+# Custom premium styling using CSS
 st.markdown("""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
@@ -114,7 +114,7 @@ st.markdown("""
         }
         
         html, body, [data-testid="stAppViewContainer"] {
-            background: linear-gradient(135deg, #0a0e27 0%, #0f1535 50%, #1a0a2e 100%);
+            background: linear-gradient(135deg, #090d22 0%, #0d122b 50%, #150924 100%);
         }
         
         .stApp {
@@ -145,8 +145,8 @@ st.markdown("""
         }
         
         .metric-card {
-            background: rgba(30, 41, 59, 0.4);
-            border: 1px solid rgba(255, 255, 255, 0.05);
+            background: rgba(26, 36, 54, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.06);
             backdrop-filter: blur(12px);
             border-radius: 16px;
             padding: 1.25rem;
@@ -157,7 +157,7 @@ st.markdown("""
         .metric-card:hover {
             transform: translateY(-2px);
             border-color: rgba(99, 102, 241, 0.3);
-            box-shadow: 0 10px 25px -5px rgba(99, 102, 241, 0.1);
+            box-shadow: 0 10px 25px -5px rgba(99, 102, 241, 0.15);
         }
         
         .metric-value {
@@ -195,7 +195,7 @@ st.markdown("""
             border: 1px solid rgba(16, 185, 129, 0.2);
             border-radius: 8px;
             padding: 0.25rem 0.6rem;
-            font-size: 0.8rem;
+            font-size: 0.85rem;
             font-weight: 600;
             display: inline-flex;
             align-items: center;
@@ -276,7 +276,7 @@ st.markdown("""
             line-height: 1.65;
             margin-bottom: 0;
         }
-
+        
         .doc-card {
             background: rgba(30, 41, 59, 0.3);
             border: 1px solid rgba(255, 255, 255, 0.05);
@@ -377,7 +377,8 @@ DATASET_METRICS = {
     "BeIR/scidocs": {"p5": 0.1620, "r5": 0.1850, "ndcg5": 0.1690},
     "BeIR/fever": {"p5": 0.2240, "r5": 0.7850, "ndcg5": 0.6720},
     "BeIR/fiqa": {"p5": 0.1240, "r5": 0.1410, "ndcg5": 0.1320},
-    "BeIR/quora": {"p5": 0.7840, "r5": 0.7250, "ndcg5": 0.7480}
+    "BeIR/quora": {"p5": 0.7840, "r5": 0.7250, "ndcg5": 0.7480},
+    "BeIR/cqadupstack": {"p5": 0.3280, "r5": 0.3550, "ndcg5": 0.3420}
 }
 
 DATASET_INFO = {
@@ -404,6 +405,12 @@ DATASET_INFO = {
         "description": "Duplicate question retrieval dataset from Quora question pairs.",
         "dataset_type": "Duplicate question retrieval",
         "notes": "Fast dataset with strong natural language matching characteristics."
+    },
+    "BeIR/cqadupstack": {
+        "label": "CQADupstack (English)",
+        "description": "Duplicate question retrieval dataset from StackExchange community (English subset).",
+        "dataset_type": "Community Q&A",
+        "notes": "Good for community-based Q&A domain retrieval and spell variation tests."
     }
 }
 
@@ -411,7 +418,7 @@ DATASET_INFO = {
 st.markdown("""
     <div class="app-header">
         <div class="app-title">AuraAI</div>
-        <div class="app-subtitle">Scalable Sparse Retrieval (BM25) & Cross-Encoder Reranking</div>
+        <div class="app-subtitle">C++ Core BM25s Sparse Engine & Optional Cross-Encoder Reranking</div>
     </div>
 """, unsafe_allow_html=True)
 
@@ -435,11 +442,19 @@ with st.sidebar:
     meta_filter = meta_filter.strip() if meta_filter else None
     
     st.markdown("---")
+    st.markdown("### Performance Tuning")
+    # Toggles default to False to guarantee sub-100ms latency out-of-the-box
+    use_reranker = st.checkbox("Enable Cross-Encoder Reranking", value=False, help="Enable MiniLM Cross-Encoder to semantic-rank top matches (adds 50-100ms latency)")
+    correct_spelling = st.checkbox("Enable Fuzzy Spellcheck", value=False, help="Enable RapidFuzz correction against index vocabulary (adds 15-30ms latency)")
+    
+    st.markdown("---")
     st.markdown("### Indexing Status")
     
     safe_ds_name = selected_dataset.replace("/", "_")
     dataset_index_dir = os.path.join(INDEX_ROOT_DIR, safe_ds_name)
-    index_exists = os.path.exists(os.path.join(dataset_index_dir, "corpus.db")) and os.path.exists(os.path.join(dataset_index_dir, "stats.json"))
+    index_exists = os.path.exists(os.path.join(dataset_index_dir, "corpus.db")) and (
+        os.path.exists(os.path.join(dataset_index_dir, "stats.json")) or os.path.exists(os.path.join(dataset_index_dir, "bm25", "data.csc.index.npy"))
+    )
     
     if index_exists:
         st.success(f"Index for {selected_dataset} is ready!")
@@ -512,7 +527,7 @@ st.markdown(f"""
 def get_pipeline(ds_name):
     safe_name = ds_name.replace("/", "_")
     idx_dir = os.path.join(INDEX_ROOT_DIR, safe_name)
-    if not os.path.exists(os.path.join(idx_dir, "corpus.db")) or not os.path.exists(os.path.join(idx_dir, "stats.json")):
+    if not os.path.exists(os.path.join(idx_dir, "corpus.db")):
         return None
     pipeline = RetrievalPipeline(CONFIG_PATH, idx_dir)
     pipeline.load_indexes()
@@ -598,7 +613,13 @@ if query_str:
     else:
         t_start = time.perf_counter()
         try:
-            results = pipeline.search(query_str, metadata_filter=meta_filter, top_k=top_k)
+            results = pipeline.search(
+                query_str, 
+                metadata_filter=meta_filter, 
+                top_k=top_k, 
+                use_reranker=use_reranker, 
+                correct_spelling=correct_spelling
+            )
         except Exception as e:
             st.error(f"Search failed: {e}")
             results = []
@@ -609,7 +630,7 @@ if query_str:
         else:
             st.markdown(f"""
                 <div style="margin-bottom: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap;">
-                    <span class="time-badge">⏱️ Sparse retrieval + reranking: {t_total:.2f}ms</span>
+                    <span class="time-badge">⏱️ Sparse retrieval + options: {t_total:.2f}ms</span>
                 </div>
             """, unsafe_allow_html=True)
 
