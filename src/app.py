@@ -15,40 +15,74 @@ def download_index_from_hf(repo_id, safe_dataset_name, index_root_dir):
     from huggingface_hub import list_repo_files, hf_hub_download
     import shutil
     
+    temp_dir = os.path.join(index_root_dir, f"{safe_dataset_name}_temp")
+    final_dir = os.path.join(index_root_dir, safe_dataset_name)
+    
+    # Clean up any leftover temp dir
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir, exist_ok=True)
+        
     try:
         files = list_repo_files(repo_id=repo_id, repo_type="dataset")
     except Exception as e:
+        if os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
         raise Exception(f"Failed to list files in Hugging Face repository '{repo_id}': {e}")
         
     prefix = f"{safe_dataset_name}/"
     dataset_files = [f for f in files if f.startswith(prefix)]
     
     if not dataset_files:
+        if os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
         raise Exception(f"No index files found in Hugging Face repository '{repo_id}' under directory '{safe_dataset_name}/'")
         
     progress_bar = st.progress(0.0)
     status_text = st.empty()
     
     num_files = len(dataset_files)
-    for idx, repo_file in enumerate(dataset_files):
-        rel_path = os.path.relpath(repo_file, safe_dataset_name)
-        local_file_path = os.path.join(index_root_dir, safe_dataset_name, rel_path)
+    try:
+        for idx, repo_file in enumerate(dataset_files):
+            rel_path = os.path.relpath(repo_file, safe_dataset_name)
+            local_file_path = os.path.join(temp_dir, rel_path)
+            
+            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+            
+            status_text.text(f"Downloading {rel_path} ({idx + 1}/{num_files})...")
+            progress_bar.progress(idx / num_files)
+            
+            downloaded_path = hf_hub_download(
+                repo_id=repo_id,
+                filename=repo_file,
+                repo_type="dataset"
+            )
+            
+            shutil.copy(downloaded_path, local_file_path)
+            
+        # Rename temp_dir to final_dir atomically
+        if os.path.exists(final_dir):
+            shutil.rmtree(final_dir)
+        os.rename(temp_dir, final_dir)
         
-        os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+        progress_bar.progress(1.0)
+        status_text.text("Download completed successfully!")
+        time.sleep(1.0)
+        status_text.empty()
         
-        status_text.text(f"Downloading {rel_path} ({idx + 1}/{num_files})...")
-        progress_bar.progress(idx / num_files)
-        
-        downloaded_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=repo_file,
-            repo_type="dataset"
-        )
-        
-        shutil.copy(downloaded_path, local_file_path)
-        
-    progress_bar.progress(1.0)
-    status_text.empty()
+    except Exception as e:
+        if os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
+        raise e
 
 warnings.filterwarnings('ignore')
 
@@ -67,6 +101,8 @@ if 'pipeline_cache' not in st.session_state:
     st.session_state.pipeline_cache = {}
 if 'search_history' not in st.session_state:
     st.session_state.search_history = []
+if 'downloading' not in st.session_state:
+    st.session_state.downloading = False
 
 # Custom premium styling using CSS - Optimized for speed
 st.markdown("""
@@ -385,7 +421,8 @@ with st.sidebar:
     selected_dataset = st.selectbox(
         "Select Dataset",
         list(DATASET_INFO.keys()),
-        format_func=lambda name: f"{DATASET_INFO[name]['label']} ({name})"
+        format_func=lambda name: f"{DATASET_INFO[name]['label']} ({name})",
+        disabled=st.session_state.downloading
     )
     
     dataset_info = DATASET_INFO[selected_dataset]
@@ -394,7 +431,7 @@ with st.sidebar:
     st.markdown(f"**Notes:** {dataset_info['notes']}")
     st.markdown("---")
 
-    meta_filter = st.text_input("Metadata Filter Expression", placeholder="e.g. year == 2020")
+    meta_filter = st.text_input("Metadata Filter Expression", placeholder="e.g. year == 2020", disabled=st.session_state.downloading)
     meta_filter = meta_filter.strip() if meta_filter else None
     
     st.markdown("---")
@@ -418,39 +455,41 @@ with st.sidebar:
         except Exception:
             hf_repo_id = "CaptDoom/auraai-indexes"
             
-        # For FEVER, we enforce downloading because live building is too heavy and will crash Streamlit Cloud
-        if selected_dataset == "BeIR/fever":
-            st.info("FEVER index is massive (~5.4GB) and cannot be built live due to memory constraints on Streamlit Cloud.")
-            if st.button("Download Pre-built Index from HF"):
-                try:
-                    with st.spinner("Downloading pre-built index files from Hugging Face..."):
-                        download_index_from_hf(hf_repo_id, safe_ds_name, INDEX_ROOT_DIR)
-                    st.success("Download complete! Index is ready.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Download failed: {str(e)}")
+        # Download handler if downloading is active
+        if st.session_state.downloading:
+            try:
+                download_index_from_hf(hf_repo_id, safe_ds_name, INDEX_ROOT_DIR)
+                st.success("Download complete! Index is ready.")
+                st.session_state.downloading = False
+                st.rerun()
+            except Exception as e:
+                st.error(f"Download failed: {str(e)}")
+                st.session_state.downloading = False
+                st.rerun()
         else:
-            # For other datasets, allow build live OR download from Hugging Face
-            col_build, col_dl = st.columns(2)
-            with col_build:
-                if st.button("Build Index Live"):
-                    with st.spinner(f"Indexing {selected_dataset}... this can take several minutes."):
-                        try:
-                            from src.evaluate import build_index
-                            build_index(selected_dataset, CONFIG_PATH, dataset_index_dir)
-                            st.success("Indexing finished! Reloading page...")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Indexing failed: {str(e)[:200]}. Try using CLI: python src/evaluate.py --dataset {selected_dataset}")
-            with col_dl:
-                if st.button("Download from HF"):
-                    try:
-                        with st.spinner("Downloading pre-built index from Hugging Face..."):
-                            download_index_from_hf(hf_repo_id, safe_ds_name, INDEX_ROOT_DIR)
-                        st.success("Download complete! Index is ready.")
+            # For FEVER, we enforce downloading because live building is too heavy and will crash Streamlit Cloud
+            if selected_dataset == "BeIR/fever":
+                st.info("FEVER index is massive (~5.4GB) and cannot be built live due to memory constraints on Streamlit Cloud.")
+                if st.button("Download Pre-built Index from HF"):
+                    st.session_state.downloading = True
+                    st.rerun()
+            else:
+                # For other datasets, allow build live OR download from Hugging Face
+                col_build, col_dl = st.columns(2)
+                with col_build:
+                    if st.button("Build Index Live"):
+                        with st.spinner(f"Indexing {selected_dataset}... this can take several minutes."):
+                            try:
+                                from src.evaluate import build_index
+                                build_index(selected_dataset, CONFIG_PATH, dataset_index_dir)
+                                st.success("Indexing finished! Reloading page...")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Indexing failed: {str(e)[:200]}. Try using CLI: python src/evaluate.py --dataset {selected_dataset}")
+                with col_dl:
+                    if st.button("Download from HF"):
+                        st.session_state.downloading = True
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Download failed: {str(e)}")
 
 # Selected dataset summary
 selected_dataset_info = DATASET_INFO[selected_dataset]
@@ -515,9 +554,9 @@ st.subheader("Interactive Retrieval Panel")
 
 search_col1, search_col2 = st.columns([4, 1])
 with search_col1:
-    query_str = st.text_input("Enter search query", placeholder="Type keywords...", label_visibility="collapsed")
+    query_str = st.text_input("Enter search query", placeholder="Type keywords...", label_visibility="collapsed", disabled=st.session_state.downloading)
 with search_col2:
-    top_k = st.slider("Top results", min_value=1, max_value=10, value=5, step=1)
+    top_k = st.slider("Top results", min_value=1, max_value=10, value=5, step=1, disabled=st.session_state.downloading)
 
 import re
 
