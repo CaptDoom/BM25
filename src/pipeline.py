@@ -1,11 +1,44 @@
 import os
 import yaml
 import gc
+import re
 from functools import lru_cache
 from src.preprocessing import QueryPreprocessor, parse_filter
 from src.retrievers.bm25 import ShardedBM25
 from src.reranker import CrossEncoderReranker
 from src.data_loader import CorpusDBHelper
+
+def parse_embedded_filters(query_str):
+    # Matches patterns like @dataset(fever)
+    filters = re.findall(r"@(\w+)\(([^)]+)\)", query_str)
+    # Clean query from filters
+    cleaned = re.sub(r"@\w+\([^)]+\)", "", query_str).strip()
+    return cleaned, filters
+
+def translate_filters_to_bitmap_names(filters):
+    names = []
+    for field, val in filters:
+        field = field.lower().strip()
+        val = val.lower().strip()
+        
+        if field == "dataset":
+            # 0=FEVER, 1=Quora, 2=SciDocs, 3=FIQA, 4=CQADupstack, 5=Other
+            ds_map = {
+                "fever": 0, "quora": 1, "scidocs": 2, "fiqa": 3, "cqadupstack": 4
+            }
+            ds_id = ds_map.get(val, 5)
+            names.append(f"ds_{ds_id}")
+        elif field == "has_title":
+            flag = 1 if val in ("true", "1", "yes") else 0
+            names.append(f"has_title_{flag}")
+        elif field == "length":
+            if val in ("short", "medium", "long"):
+                names.append(f"len_{val}")
+        elif field == "has_code":
+            flag = 1 if val in ("true", "1", "yes") else 0
+            names.append(f"has_code_{flag}")
+    return names
+
 
 class RetrievalPipeline:
     def __init__(self, config_path, index_dir):
@@ -68,6 +101,12 @@ class RetrievalPipeline:
             if not query or not query.strip():
                 return []
                 
+            # Parse embedded query filters
+            query, embedded_filters = parse_embedded_filters(query)
+            filter_names = translate_filters_to_bitmap_names(embedded_filters)
+            if filter_names:
+                print(f"Parsed query-embedded filters: {embedded_filters} -> {filter_names}")
+                
             corrected_query = self.preprocessor.clean_query(query, correct_spelling=correct_spelling)
             print(f"Raw query: '{query}' -> Preprocessed: '{corrected_query}'")
             
@@ -78,13 +117,13 @@ class RetrievalPipeline:
                 corrected_query = " ".join(raw_tokens[:5])  # Limit to first 5 terms
                 
             bm25_k = self.config.get("bm25", {}).get("top_k", 100)
-            bm25_results = self.bm25_retriever.search(corrected_query.split(), top_k=bm25_k, doc_mask=doc_mask)
+            bm25_results = self.bm25_retriever.search(corrected_query.split(), top_k=bm25_k, doc_mask=doc_mask, filter_names=filter_names)
             
             # Fallback strategy
             if not bm25_results:
                 raw_tokens = query.lower().split()[:10]
                 print(f"📍 No results with preprocessed query, trying raw tokens: {raw_tokens}...")
-                bm25_results = self.bm25_retriever.search(raw_tokens, top_k=bm25_k, doc_mask=doc_mask)
+                bm25_results = self.bm25_retriever.search(raw_tokens, top_k=bm25_k, doc_mask=doc_mask, filter_names=filter_names)
             
             if not bm25_results:
                 print("❌ No documents found matching the query.")

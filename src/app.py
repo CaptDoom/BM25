@@ -453,7 +453,9 @@ with st.sidebar:
     safe_ds_name = selected_dataset.replace("/", "_")
     dataset_index_dir = os.path.join(INDEX_ROOT_DIR, safe_ds_name)
     index_exists = os.path.exists(os.path.join(dataset_index_dir, "corpus.db")) and (
-        os.path.exists(os.path.join(dataset_index_dir, "stats.json")) or os.path.exists(os.path.join(dataset_index_dir, "bm25", "data.csc.index.npy"))
+        os.path.exists(os.path.join(dataset_index_dir, "stats.json")) or 
+        os.path.exists(os.path.join(dataset_index_dir, "bm25", "data.csc.index.npy")) or
+        os.path.exists(os.path.join(dataset_index_dir, "bm25", "shard_0", "data.csc.index.npy"))
     )
     
     if index_exists:
