@@ -200,6 +200,14 @@ class TestPreprocessing(unittest.TestCase):
         filter2 = parse_filter("rating >= 4.5")
         self.assertEqual(filter2, ("rating", ">=", 4.5))
         
+        # Test logical AND/OR parsing
+        from src.metadata_parser import MetadataParser
+        parser = MetadataParser()
+        parsed_logical = parser.parse("(year == 2020 AND rating >= 4.5)")
+        from src.query_ast import LogicalExpression
+        self.assertTrue(isinstance(parsed_logical, LogicalExpression))
+        self.assertEqual(parsed_logical.operator, "AND")
+        
         print(f"[OK] Filter parsing working")
         
     def test_filter_evaluation(self):
@@ -218,7 +226,17 @@ class TestPreprocessing(unittest.TestCase):
         result = evaluate_filter(metadata, ("category", "!=", "finance"))
         self.assertTrue(result)
         
+        # Test AST logical evaluation
+        from src.metadata_parser import MetadataParser
+        parser = MetadataParser()
+        parsed_ast = parser.parse("(year == 2020 AND category == 'tech')")
+        self.assertTrue(evaluate_filter(metadata, parsed_ast))
+        
+        parsed_or_ast = parser.parse("(year == 2021 OR category == 'tech')")
+        self.assertTrue(evaluate_filter(metadata, parsed_or_ast))
+        
         print(f"[OK] Filter evaluation working")
+
 
 class TestReranking(unittest.TestCase):
     """Test cross-encoder reranking"""

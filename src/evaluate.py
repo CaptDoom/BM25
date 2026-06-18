@@ -31,6 +31,11 @@ def build_index(dataset_name, config_path, index_dir):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
         
+    # Validate SystemConfig configuration schema
+    from src.config_schema import SystemConfig
+    SystemConfig(**config)
+
+        
     # 2. Build Sharded BM25 index
     bm25_cfg = config.get("bm25", {})
     bm25_retriever = ShardedBM25(
@@ -145,6 +150,10 @@ def main():
     
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
+        
+    from src.config_schema import SystemConfig
+    SystemConfig(**config)
+
         
     dataset_name = args.dataset if args.dataset else config.get("dataset_name", "BeIR/scidocs")
     # Clean dataset name for path safely

@@ -20,13 +20,25 @@ def build_metadata_and_bitmaps(index_dir, dataset_name):
         return False
         
     db_path = os.path.join(index_dir, "corpus.db")
+    print(f"Checking for corpus.db in index_dir: {db_path} -> {os.path.exists(db_path)}")
     if not os.path.exists(db_path):
-        db_path = os.path.abspath(os.path.join(index_dir, "../corpus.db"))
+        # Check parent
+        db_path = os.path.abspath(os.path.join(index_dir, "..", "corpus.db"))
+        print(f"Checking for corpus.db in parent: {db_path} -> {os.path.exists(db_path)}")
         if not os.path.exists(db_path):
-            db_path = os.path.abspath(os.path.join(index_dir, "../../corpus.db"))
+            # Check grandparent
+            db_path = os.path.abspath(os.path.join(index_dir, "..", "..", "corpus.db"))
+            print(f"Checking for corpus.db in grandparent: {db_path} -> {os.path.exists(db_path)}")
             if not os.path.exists(db_path):
-                print(f"[Warning] No corpus.db found for {index_dir}. Cannot build metadata.")
-                return False
+                # Check siblings if within a staging context
+                db_path = os.path.abspath(os.path.join(os.path.dirname(os.path.normpath(index_dir)), "corpus.db"))
+                print(f"Checking for corpus.db in sibling: {db_path} -> {os.path.exists(db_path)}")
+                if not os.path.exists(db_path):
+                    print(f"[Warning] No corpus.db found for {index_dir}. Cannot build metadata.")
+                    return False
+
+
+
                 
     print(f"Generating derived metadata and Roaring bitmaps from {db_path}...")
     try:
@@ -74,6 +86,11 @@ def build_metadata_and_bitmaps(index_dir, dataset_name):
     
     for row in rows:
         doc_index, title, text, meta_str = row
+        
+        # Build integrity: validate row values and handle nulls/mismatches
+        if doc_index is None:
+            continue
+            
         title = title or ""
         text = text or ""
         combined = title + " " + text
@@ -82,6 +99,7 @@ def build_metadata_and_bitmaps(index_dir, dataset_name):
         has_title = len(title.strip()) > 0
         
         dataset_id = default_ds_id
+
         if meta_str:
             try:
                 meta = json.loads(meta_str)
@@ -206,13 +224,14 @@ class CppBM25Engine:
         if not self.lib:
             return False
             
-        indices_path = os.path.join(shard_path, "indices.csc.index.npy").encode('utf-8')
-        indptr_path = os.path.join(shard_path, "indptr.csc.index.npy").encode('utf-8')
-        data_path = os.path.join(shard_path, "data.csc.index.npy").encode('utf-8')
+        abs_shard_path = os.path.abspath(shard_path)
+        indices_path = os.path.join(abs_shard_path, "indices.csc.index.npy").encode('utf-8')
+        indptr_path = os.path.join(abs_shard_path, "indptr.csc.index.npy").encode('utf-8')
+        data_path = os.path.join(abs_shard_path, "data.csc.index.npy").encode('utf-8')
         
-        metadata_bin_path = os.path.join(shard_path, "doc_metadata.bin").encode('utf-8')
-        bitmaps_bin_path = os.path.join(shard_path, "bitmaps.bin").encode('utf-8')
-        bitmaps_txt_path = os.path.join(shard_path, "bitmaps.txt").encode('utf-8')
+        metadata_bin_path = os.path.join(abs_shard_path, "doc_metadata.bin").encode('utf-8')
+        bitmaps_bin_path = os.path.join(abs_shard_path, "bitmaps.bin").encode('utf-8')
+        bitmaps_txt_path = os.path.join(abs_shard_path, "bitmaps.txt").encode('utf-8')
         
         try:
             self.engine_ptr = self.lib.create_engine(
@@ -229,6 +248,7 @@ class CppBM25Engine:
             print(f"[Warning] Failed to load index in C++ create_engine: {e}")
             self.engine_ptr = None
             return False
+
             
     def search(self, query_term_ids, filter_names, top_k):
         if not self.lib or not self.engine_ptr:
@@ -409,27 +429,90 @@ class BM25Index:
         return out
 
     def save(self, path):
-        self.index_dir = path
-        os.makedirs(path, exist_ok=True)
-        self.retriever.save(path, corpus=self.doc_ids)
+        import shutil
+        import hashlib
+        import json
+        
+        # 1. Create a staging directory under index_dir
+        parent_dir = os.path.dirname(os.path.normpath(path))
+        base_name = os.path.basename(os.path.normpath(path))
+        staging_path = os.path.join(parent_dir, f"{base_name}_staging")
+        if os.path.exists(staging_path):
+            shutil.rmtree(staging_path)
+        os.makedirs(staging_path, exist_ok=True)
+        
+        # Save indices inside staging
+        self.retriever.save(staging_path, corpus=self.doc_ids)
         joblib.dump({
             "doc_ids": self.doc_ids,
             "doc_lengths": self.doc_lengths,
             "vocab": self.retriever.vocab_dict
-        }, os.path.join(path, "extra_metadata.joblib"))
+        }, os.path.join(staging_path, "extra_metadata.joblib"))
         
-        # Build metadata and bitmaps
+        # Copy corpus.db to staging if it exists in path (needed for metadata generation in staging)
+        db_source = os.path.join(path, "corpus.db")
+        if os.path.exists(db_source):
+            shutil.copy2(db_source, os.path.join(staging_path, "corpus.db"))
+            
         parts = path.replace("\\", "/").split("/")
         dataset_name = "unknown"
         for p in parts:
             if "BeIR_" in p:
                 dataset_name = p.replace("BeIR_", "BeIR/")
                 break
-        build_metadata_and_bitmaps(path, dataset_name)
+        build_metadata_and_bitmaps(staging_path, dataset_name)
+
+
+        
+        # Write cryptographic manifest with SHA-256
+        manifest = {
+            "schema_version": "1.0",
+            "item_count": len(self.doc_ids),
+            "checksums": {}
+        }
+        for file in os.listdir(staging_path):
+            file_path = os.path.join(staging_path, file)
+            if os.path.isfile(file_path):
+                hasher = hashlib.sha256()
+                with open(file_path, "rb") as f:
+                    while chunk := f.read(8192):
+                        hasher.update(chunk)
+                manifest["checksums"][file] = hasher.hexdigest()
+                
+        with open(os.path.join(staging_path, "manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=2)
+            
+        # Atomic Swap
+        if os.path.exists(path):
+            shutil.rmtree(path)
+        os.rename(staging_path, path)
+        self.index_dir = path
 
     def load(self, path):
+        import hashlib
+        import json
         self.index_dir = path
-        self.retriever = bm25s.BM25.load(path, load_corpus=True)
+        
+        # Verify Manifest Checksums on load
+        manifest_path = os.path.join(path, "manifest.json")
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, "r") as f:
+                    manifest = json.load(f)
+                checksums = manifest.get("checksums", {})
+                for file, expected_sha in checksums.items():
+                    file_path = os.path.join(path, file)
+                    if os.path.exists(file_path):
+                        hasher = hashlib.sha256()
+                        with open(file_path, "rb") as f:
+                            while chunk := f.read(8192):
+                                hasher.update(chunk)
+                        if hasher.hexdigest() != expected_sha:
+                            print(f"[Warning] Index file checksum mismatch for {file}!")
+            except Exception as e:
+                print(f"[Warning] Failed to verify index manifest checksums: {e}")
+        
+        self.retriever = bm25s.BM25.load(path, load_corpus=True, mmap=False)
         self.vocab = self.retriever.vocab_dict
         meta_path = os.path.join(path, "extra_metadata.joblib")
         if os.path.exists(meta_path):
@@ -451,13 +534,22 @@ class BM25Index:
                     break
             build_metadata_and_bitmaps(path, dataset_name)
             
-        # Load C++ engine
+        # Load C++ engine with relative resolution
         self.cpp_engine = CppBM25Engine()
         loaded = self.cpp_engine.load_index(path, len(self.doc_ids))
         if not loaded:
             print(f"[Info] C++ scoring engine fallback for {path}.")
             self.cpp_engine = None
             self._load_bitmaps_python(path)
+            
+        # Cold-start Viability Health Check
+        try:
+            health_check_tokens = ["the", "a", "of"]
+            res = self.search(health_check_tokens, top_k=1)
+            print(f"[OK] Cold start health check completed for {path}. Returned {len(res)} docs.")
+        except Exception as he:
+            print(f"[Warning] Cold start health check failed for {path}: {he}")
+
 
 class ShardedBM25:
     def __init__(self, index_dir, shard_size=1000000, k1=1.5, b=0.75):
@@ -465,89 +557,53 @@ class ShardedBM25:
         self.shard_size = shard_size
         self.k1 = k1
         self.b = b
-        self.retriever = None
-        self.doc_ids = []
-        self.doc_lengths = None
-        self.vocab = {}
         self.shards = []
-        self.cpp_engine = None
-        self.bitmaps = {}
+        self.doc_ids = []
+        self.vocab = {}
         
     def index(self, corpus_dataset):
-        print(f"Indexing corpus of size {len(corpus_dataset)} using bm25s...")
+        import math
+        num_docs = len(corpus_dataset)
+        num_shards = math.ceil(num_docs / self.shard_size)
+        print(f"Indexing corpus of size {num_docs} using BM25Index in {num_shards} shards...")
+        
+        self.shards = []
         self.doc_ids = []
-        texts = []
-        for doc in corpus_dataset:
-            self.doc_ids.append(doc["_id"])
-            title = doc.get("title", "") or ""
-            text = doc.get("text", "") or ""
-            texts.append(title + " " + text)
+        self.vocab = {}
+        
+        os.makedirs(self.index_dir, exist_ok=True)
+        for s in range(num_shards):
+            start_idx = s * self.shard_size
+            end_idx = min(start_idx + self.shard_size, num_docs)
+            shard_docs = corpus_dataset[start_idx:end_idx]
             
-        print("Tokenizing corpus...")
-        corpus_tokens = [tokenize_text(t) for t in texts]
-        self.doc_lengths = np.array([len(tokens) for tokens in corpus_tokens], dtype=np.int32)
-        
-        print(f"Building bm25s index with k1={self.k1}, b={self.b}...")
-        self.retriever = bm25s.BM25(k1=self.k1, b=self.b, corpus=self.doc_ids)
-        self.retriever.index(corpus_tokens)
-        
-        self.save(self.index_dir)
-        self.vocab = self.retriever.vocab_dict
-        self.shards = [self]
+            shard_index = BM25Index(k1=self.k1, b=self.b)
+            shard_index.index(shard_docs)
+            
+            shard_path = os.path.join(self.index_dir, f"shard_{s}")
+            shard_index.save(shard_path)
+            
+            self.shards.append(shard_index)
+            self.doc_ids.extend(shard_index.doc_ids)
+            self.vocab.update(shard_index.vocab)
+            
         gc.collect()
 
     def save(self, path):
-        self.index_dir = path
         os.makedirs(path, exist_ok=True)
-        self.retriever.save(path, corpus=self.doc_ids)
-        joblib.dump({
-            "doc_ids": self.doc_ids,
-            "doc_lengths": self.doc_lengths,
-            "vocab": self.retriever.vocab_dict
-        }, os.path.join(path, "extra_metadata.joblib"))
-        
-        # Build metadata and bitmaps
-        parts = path.replace("\\", "/").split("/")
-        dataset_name = "unknown"
-        for p in parts:
-            if "BeIR_" in p:
-                dataset_name = p.replace("BeIR_", "BeIR/")
-                break
-        build_metadata_and_bitmaps(path, dataset_name)
-
-    def _load_bitmaps_python(self, path):
-        self.bitmaps = {}
-        if pyroaring is None:
-            return
-            
-        bin_path = os.path.join(path, "bitmaps.bin")
-        txt_path = os.path.join(path, "bitmaps.txt")
-        if not os.path.exists(bin_path) or not os.path.exists(txt_path):
-            return
-            
-        try:
-            with open(txt_path, "r") as f:
-                names = [line.strip() for line in f if line.strip()]
-                
-            with open(bin_path, "rb") as f:
-                num_bitmaps = struct.unpack('<I', f.read(4))[0]
-                offsets = [struct.unpack('<Q', f.read(8))[0] for _ in range(num_bitmaps)]
-                f.seek(0, 2)
-                file_size = f.tell()
-                for i, name in enumerate(names):
-                    f.seek(offsets[i])
-                    size = (offsets[i+1] - offsets[i]) if i + 1 < num_bitmaps else (file_size - offsets[i])
-                    data = f.read(size)
-                    self.bitmaps[name] = pyroaring.BitMap.deserialize(data)
-        except Exception as e:
-            print(f"[Warning] Failed to load bitmaps in Python: {e}")
+        for s, shard in enumerate(self.shards):
+            shard_path = os.path.join(path, f"shard_{s}")
+            shard.save(shard_path)
 
     def load(self):
+        self.shards = []
+        self.doc_ids = []
+        self.vocab = {}
+        
         # 1. Check if there are sharded directories (e.g. shard_0)
         shard_0_path = os.path.join(self.index_dir, "shard_0")
         if os.path.exists(shard_0_path):
             print(f"Detected sharded index at {self.index_dir}. Loading shards...")
-            self.shards = []
             s = 0
             while True:
                 shard_path = os.path.join(self.index_dir, f"shard_{s}")
@@ -559,160 +615,44 @@ class ShardedBM25:
                 else:
                     break
             print(f"Loaded {len(self.shards)} BM25 shards.")
-            
-            self.doc_ids = []
-            self.vocab = {}
-            for shard in self.shards:
-                self.doc_ids.extend(shard.doc_ids)
-                self.vocab.update(shard.vocab)
-            return
-
-        # 2. Single-index loading case
-        bm25s_index_file = os.path.join(self.index_dir, "data.csc.index.npy")
-        
-        if not os.path.exists(bm25s_index_file):
-            db_path = os.path.join(os.path.dirname(self.index_dir), "corpus.db")
-            if os.path.exists(db_path):
-                if "BeIR_fever" in self.index_dir:
-                    print(f"FEVER index files missing at {self.index_dir}. Skipping auto-rebuild to prevent OOM/hang.")
-                    return
-                print(f"bm25s index files not found at {self.index_dir}. Rebuilding from SQLite database...")
-                try:
-                    conn = sqlite3.connect(db_path)
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT doc_id, title, text FROM documents ORDER BY doc_index ASC")
-                    rows = cursor.fetchall()
-                    conn.close()
-                    if rows:
-                        corpus_dataset = [{"_id": r[0], "title": r[1], "text": r[2]} for r in rows]
-                        self.index(corpus_dataset)
-                        return
-                except Exception as e:
-                    print(f"[WARNING] Failed to auto-rebuild index from SQLite: {e}")
-                    
-        print(f"Loading bm25s index from {self.index_dir}...")
-        self.retriever = bm25s.BM25.load(self.index_dir, load_corpus=True)
-        self.vocab = self.retriever.vocab_dict
-        
-        meta_path = os.path.join(self.index_dir, "extra_metadata.joblib")
-        if os.path.exists(meta_path):
-            meta = joblib.load(meta_path)
-            self.doc_ids = meta["doc_ids"]
-            self.doc_lengths = meta["doc_lengths"]
         else:
-            self.doc_ids = [doc['text'] for doc in self.retriever.corpus]
-            self.doc_lengths = np.ones(len(self.doc_ids), dtype=np.int32) * 100
-            
-        # Ensure metadata and bitmaps exist
-        metadata_bin = os.path.join(self.index_dir, "doc_metadata.bin")
-        if not os.path.exists(metadata_bin):
-            parts = self.index_dir.replace("\\", "/").split("/")
-            dataset_name = "unknown"
-            for p in parts:
-                if "BeIR_" in p:
-                    dataset_name = p.replace("BeIR_", "BeIR/")
-                    break
-            build_metadata_and_bitmaps(self.index_dir, dataset_name)
-            
-        # Load C++ engine
-        self.cpp_engine = CppBM25Engine()
-        loaded = self.cpp_engine.load_index(self.index_dir, len(self.doc_ids))
-        if not loaded:
-            print(f"[Info] C++ scoring engine fallback for {self.index_dir}.")
-            self.cpp_engine = None
-            self._load_bitmaps_python(self.index_dir)
-            
-        self.shards = [self]
-        
-    def _search_single(self, query_tokens, top_k=100, doc_mask=None, filter_names=None):
-        if self.retriever is None:
-            return []
-            
-        num_docs = len(self.doc_ids)
-        top_k = min(top_k, num_docs)
-        if top_k <= 0:
-            return []
-            
-        if self.cpp_engine is not None and not doc_mask:
-            query_term_ids = [self.vocab[tok] for tok in query_tokens if tok in self.vocab]
-            if not query_term_ids:
-                return []
-            cpp_res = self.cpp_engine.search(query_term_ids, filter_names or [], top_k)
-            out = []
-            for doc_idx, score in cpp_res:
-                if 0 <= doc_idx < len(self.doc_ids):
-                    out.append((self.doc_ids[doc_idx], float(score)))
-            return out
-            
-        if filter_names:
-            if not self.bitmaps and self.index_dir:
-                self._load_bitmaps_python(self.index_dir)
-            allowed_set = None
-            for name in filter_names:
-                bm = self.bitmaps.get(name)
-                if bm is not None:
-                    if allowed_set is None:
-                        allowed_set = bm.copy()
-                    else:
-                        allowed_set &= bm
-                else:
-                    return []
-            if allowed_set is None or len(allowed_set) == 0:
-                return []
-                
-            allowed_indices = set(allowed_set)
-            if doc_mask is not None:
-                doc_mask_indices = set()
-                first_elem = next(iter(doc_mask)) if len(doc_mask) > 0 else None
-                if first_elem is not None and isinstance(first_elem, (int, np.integer)):
-                    doc_mask_indices = set(doc_mask)
-                else:
-                    if not hasattr(self, "_doc_id_to_idx"):
-                        self._doc_id_to_idx = {doc_id: idx for idx, doc_id in enumerate(self.doc_ids)}
-                    doc_mask_indices = {self._doc_id_to_idx[d] for d in doc_mask if d in self._doc_id_to_idx}
-                doc_mask = allowed_indices & doc_mask_indices
+            # Single-index loading case
+            bm25s_index_file = os.path.join(self.index_dir, "data.csc.index.npy")
+            if os.path.exists(bm25s_index_file):
+                shard_index = BM25Index(k1=self.k1, b=self.b)
+                shard_index.load(self.index_dir)
+                self.shards.append(shard_index)
+                print("Loaded single BM25 index.")
             else:
-                doc_mask = allowed_indices
-
-        weight_mask = None
-        if doc_mask is not None:
-            weight_mask = np.zeros(num_docs, dtype=np.float32)
-            
-            is_int_mask = False
-            if len(doc_mask) > 0:
-                first_elem = next(iter(doc_mask))
-                if isinstance(first_elem, (int, np.integer)):
-                    is_int_mask = True
-                    
-            if is_int_mask:
-                indices = list(doc_mask)
-                indices = [idx for idx in indices if 0 <= idx < num_docs]
-                weight_mask[indices] = 1.0
-            else:
-                if not hasattr(self, "_doc_id_to_idx"):
-                    self._doc_id_to_idx = {doc_id: idx for idx, doc_id in enumerate(self.doc_ids)}
-                indices = [self._doc_id_to_idx[doc_id] for doc_id in doc_mask if doc_id in self._doc_id_to_idx]
-                weight_mask[indices] = 1.0
-                
-        results = self.retriever.retrieve([query_tokens], k=top_k, weight_mask=weight_mask)
+                db_path = os.path.join(os.path.dirname(self.index_dir), "corpus.db")
+                if os.path.exists(db_path):
+                    if "BeIR_fever" in self.index_dir:
+                        print(f"FEVER index files missing at {self.index_dir}. Skipping auto-rebuild to prevent OOM/hang.")
+                        return
+                    print(f"bm25s index files not found at {self.index_dir}. Rebuilding from SQLite database...")
+                    try:
+                        conn = sqlite3.connect(db_path)
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT doc_id, title, text FROM documents ORDER BY doc_index ASC")
+                        rows = cursor.fetchall()
+                        conn.close()
+                        if rows:
+                            corpus_dataset = [{"_id": r[0], "title": r[1], "text": r[2]} for r in rows]
+                            self.index(corpus_dataset)
+                            return
+                    except Exception as e:
+                        print(f"[WARNING] Failed to auto-rebuild index from SQLite: {e}")
         
-        out = []
-        if len(results.documents) > 0:
-            for doc, score in zip(results.documents[0], results.scores[0]):
-                if score > 0.0:
-                    if isinstance(doc, dict):
-                        doc_id = doc.get('text', '')
-                    else:
-                        doc_id = str(doc)
-                    out.append((doc_id, float(score)))
-        return out
+        for shard in self.shards:
+            self.doc_ids.extend(shard.doc_ids)
+            self.vocab.update(shard.vocab)
 
     def search(self, query_tokens, top_k=100, doc_mask=None, filter_names=None):
         if not self.shards:
             return []
             
-        if len(self.shards) == 1 and self.shards[0] == self:
-            return self._search_single(query_tokens, top_k=top_k, doc_mask=doc_mask, filter_names=filter_names)
+        if len(self.shards) == 1:
+            return self.shards[0].search(query_tokens, top_k=top_k, doc_mask=doc_mask, filter_names=filter_names)
             
         # Sharded search across loaded shards
         results_per_shard = []

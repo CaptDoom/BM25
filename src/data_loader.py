@@ -138,25 +138,51 @@ class CorpusDBHelper:
     def get_all_doc_ids_matching_filter(self, parsed_filter):
         if not parsed_filter:
             return None
-        field, op, val = parsed_filter
+            
+        from src.query_ast import FilterExpression, LogicalExpression, NotExpression
         
-        sql_ops = {"==": "=", "!=": "!=", ">=": ">=", "<=": "<=", ">": ">", "<": "<"}
-        if op not in sql_ops:
-            return set()
-        sql_op = sql_ops[op]
+        # Helper to construct SQL where clause and parameters recursively
+        def build_sql_where(node) -> tuple:
+            # Handle tuple for backward compatibility
+            if isinstance(node, tuple) and len(node) == 3:
+                f, o, v = node
+                sql_ops = {"==": "=", "!=": "!=", ">=": ">=", "<=": "<=", ">": ">", "<": "<"}
+                if o not in sql_ops:
+                    return "1=0", []
+                return f"json_extract(metadata, '$.{f}') {sql_ops[o]} ?", [v]
+                
+            if isinstance(node, FilterExpression):
+                sql_ops = {"==": "=", "!=": "!=", ">=": ">=", "<=": "<=", ">": ">", "<": "<"}
+                if node.operator not in sql_ops:
+                    return "1=0", []
+                return f"json_extract(metadata, '$.{node.field}') {sql_ops[node.operator]} ?", [node.value]
+                
+            elif isinstance(node, LogicalExpression):
+                left_clause, left_params = build_sql_where(node.left)
+                right_clause, right_params = build_sql_where(node.right)
+                return f"({left_clause} {node.operator} {right_clause})", left_params + right_params
+                
+            elif isinstance(node, NotExpression):
+                clause, params = build_sql_where(node.operand)
+                return f"(NOT ({clause}))", params
+                
+            return "1=1", []
+            
+        where_clause, params = build_sql_where(parsed_filter)
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         try:
-            query = f"SELECT doc_id FROM documents WHERE json_extract(metadata, '$.{field}') {sql_op} ?"
-            cursor.execute(query, (val,))
+            query = f"SELECT doc_id FROM documents WHERE {where_clause}"
+            cursor.execute(query, params)
             matching_ids = {row[0] for row in cursor.fetchall() if row[0] is not None}
         except sqlite3.OperationalError:
             matching_ids = set()
             
         conn.close()
         return matching_ids
+
 
 def get_batch_docs(dataset, start, end):
     slice_data = dataset[start:end]

@@ -118,41 +118,72 @@ class QueryPreprocessor:
         return " ".join(corrected_words)
 
 def parse_filter(filter_str):
-    if not filter_str:
-        return None
-    match = re.match(r"(\w+)\s*(==|!=|>=|<=|>|<)\s*(.+)", filter_str)
-    if not match:
-        raise ValueError(f"Invalid filter syntax: {filter_str}")
-    field, op, val = match.groups()
-    val = val.strip().strip("'\"")
-    try:
-        if "." in val:
-            val = float(val)
-        else:
-            val = int(val)
-    except ValueError:
-        pass
-    return field, op, val
+    from src.metadata_parser import MetadataParser
+    parser = MetadataParser()
+    ast = parser.parse(filter_str)
+    # Return a tuple (field, op, val) if it's a simple FilterExpression to preserve backward compatibility for tests
+    from src.query_ast import FilterExpression
+    if isinstance(ast, FilterExpression):
+        return ast.field, ast.operator, ast.value
+    return ast
 
 def evaluate_filter(doc_metadata, parsed_filter):
     if not parsed_filter:
         return True
     if not doc_metadata or not isinstance(doc_metadata, dict):
         return False
-    field, op, val = parsed_filter
-    if field not in doc_metadata:
+        
+    from src.query_ast import FilterExpression, LogicalExpression, NotExpression
+    
+    # Check if we got the tuple-based format (field, op, val) for backward compatibility
+    if isinstance(parsed_filter, tuple) and len(parsed_filter) == 3:
+        field, op, val = parsed_filter
+        if field not in doc_metadata:
+            return False
+        doc_val = doc_metadata[field]
+        if op == "==":
+            return doc_val == val
+        elif op == "!=":
+            return doc_val != val
+        elif op == ">=":
+            return doc_val >= val
+        elif op == "<=":
+            return doc_val <= val
+        elif op == ">":
+            return doc_val > val
+        elif op == "<":
+            return doc_val < val
         return False
-    doc_val = doc_metadata[field]
-    if op == "==":
-        return doc_val == val
-    elif op == "!=":
-        return doc_val != val
-    elif op == ">=":
-        return doc_val >= val
-    elif op == "<=":
-        return doc_val <= val
-    elif op == ">":
-        return doc_val > val
-    elif op == "<":
-        return doc_val < val
+        
+    # Evaluate AST Nodes
+    if isinstance(parsed_filter, FilterExpression):
+        field, op, val = parsed_filter.field, parsed_filter.operator, parsed_filter.value
+        if field not in doc_metadata:
+            return False
+        doc_val = doc_metadata[field]
+        if op == "==":
+            return doc_val == val
+        elif op == "!=":
+            return doc_val != val
+        elif op == ">=":
+            return doc_val >= val
+        elif op == "<=":
+            return doc_val <= val
+        elif op == ">":
+            return doc_val > val
+        elif op == "<":
+            return doc_val < val
+            
+    elif isinstance(parsed_filter, LogicalExpression):
+        left_val = evaluate_filter(doc_metadata, parsed_filter.left)
+        right_val = evaluate_filter(doc_metadata, parsed_filter.right)
+        if parsed_filter.operator == "AND":
+            return left_val and right_val
+        elif parsed_filter.operator == "OR":
+            return left_val or right_val
+            
+    elif isinstance(parsed_filter, NotExpression):
+        return not evaluate_filter(doc_metadata, parsed_filter.operand)
+        
     return False
+

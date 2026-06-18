@@ -82,20 +82,27 @@ class RetrievalPipeline:
             
     @lru_cache(maxsize=1024)
     def search(self, query, metadata_filter=None, top_k=10, use_reranker=False, correct_spelling=False):
+        import time
+        start_time = time.time()
+        timeout_limit = 5.0 # Max 5 seconds execution limit per query thread context
+        
         try:
             self.load_indexes()
             
+            # 1. Parse Metadata Filter into AST
             doc_mask = None
             if metadata_filter:
                 try:
-                    parsed_filter = parse_filter(metadata_filter)
-                    print(f"Applying metadata filter: {parsed_filter}")
+                    from src.metadata_parser import MetadataParser
+                    parser = MetadataParser()
+                    parsed_filter = parser.parse(metadata_filter)
+                    print(f"Applying metadata AST filter: {parsed_filter}")
                     doc_mask = self.db_helper.get_all_doc_ids_matching_filter(parsed_filter)
                     print(f"Filter matched {len(doc_mask) if doc_mask else 0} documents.")
                     if doc_mask is not None and len(doc_mask) == 0:
                         return []
                 except Exception as filter_err:
-                    print(f"⚠️ Filter error: {filter_err}. Proceeding without filter.")
+                    print(f"⚠️ Filter parsing error: {filter_err}. Proceeding without filter.")
                     doc_mask = None
                     
             if not query or not query.strip():
@@ -107,14 +114,28 @@ class RetrievalPipeline:
             if filter_names:
                 print(f"Parsed query-embedded filters: {embedded_filters} -> {filter_names}")
                 
-            corrected_query = self.preprocessor.clean_query(query, correct_spelling=correct_spelling)
+            # 2. Query Normalization using QueryTransformer
+            from src.query_transformer import QueryTransformer
+            p_cfg = self.config.get("preprocessing", {})
+            transformer = QueryTransformer(
+                lowercase=p_cfg.get("lowercase", True),
+                remove_punctuation=p_cfg.get("remove_punctuation", True),
+                remove_stopwords=p_cfg.get("remove_stopwords", True)
+            )
+            corrected_query = transformer.normalize(query)
+            if correct_spelling:
+                corrected_query = self.preprocessor.correct_spelling(corrected_query)
             print(f"Raw query: '{query}' -> Preprocessed: '{corrected_query}'")
             
             if not corrected_query or not corrected_query.strip():
-                # Try with original query if all words were stopwords
                 print("⚠️ Query became empty after preprocessing. Retrying with raw terms.")
                 raw_tokens = query.lower().split()
-                corrected_query = " ".join(raw_tokens[:5])  # Limit to first 5 terms
+                corrected_query = " ".join(raw_tokens[:5])
+                
+            # Check timeout
+            if time.time() - start_time > timeout_limit:
+                print("⚠️ Search execution timeout limit exceeded during preprocessing.")
+                return []
                 
             bm25_k = self.config.get("bm25", {}).get("top_k", 100)
             bm25_results = self.bm25_retriever.search(corrected_query.split(), top_k=bm25_k, doc_mask=doc_mask, filter_names=filter_names)
@@ -127,6 +148,11 @@ class RetrievalPipeline:
             
             if not bm25_results:
                 print("❌ No documents found matching the query.")
+                return []
+                
+            # Check timeout
+            if time.time() - start_time > timeout_limit:
+                print("⚠️ Search execution timeout limit exceeded during BM25 search.")
                 return []
             
             # Reranking with error handling
@@ -147,6 +173,7 @@ class RetrievalPipeline:
             else:
                 reranked_results = bm25_results[:top_k]
             
+            # Lazy hydration - load document text only for the final top_k documents
             final_doc_ids = [doc_id for doc_id, _ in reranked_results]
             enriched_docs = self.db_helper.get_documents(final_doc_ids)
             
@@ -168,3 +195,4 @@ class RetrievalPipeline:
             import traceback
             traceback.print_exc()
             return []
+

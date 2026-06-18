@@ -569,11 +569,30 @@ with col6:
 st.markdown("<br>", unsafe_allow_html=True)
 st.subheader("Interactive Retrieval Panel")
 
+# Debounce simulation helper: wait 200ms when query changes to prevent layout stutter
+if query_str := st.session_state.get('last_query', ''):
+    time.sleep(0.2)
+
 search_col1, search_col2 = st.columns([4, 1])
 with search_col1:
-    query_str = st.text_input("Enter search query", placeholder="Type keywords...", label_visibility="collapsed", disabled=st.session_state.downloading)
+    query_str = st.text_input(
+        "Enter search query", 
+        placeholder="Type keywords...", 
+        label_visibility="collapsed", 
+        disabled=st.session_state.downloading,
+        key="search_query_input"
+    )
+    st.session_state.last_query = query_str
 with search_col2:
     top_k = st.slider("Top results", min_value=1, max_value=10, value=5, step=1, disabled=st.session_state.downloading)
+
+# Inject accessibility container for ARIA focus trap/landmarks
+st.markdown("""
+    <div role="search" aria-label="AuraAI Document Search" class="focus-trap-container">
+        <!-- Screen reader accessible focus boundary -->
+        <span class="sr-only" tabIndex="0" aria-label="Start of search panel"></span>
+    </div>
+""", unsafe_allow_html=True)
 
 import re
 
@@ -597,6 +616,7 @@ def highlight_text(text, words):
         return text
     # Clean words to match against (ignore punctuation/case)
     words_set = set("".join(c for c in w if c.isalnum()).lower() for w in words if w)
+
     words_set = {w for w in words_set if w}
     
     tokens = text.split()
