@@ -10,3 +10,6 @@ numpy>=1.24.0
 scipy>=1.10.0
 joblib>=1.2.0
 tqdm>=4.65.0
+pydantic
+bm25s
+pyroaring
