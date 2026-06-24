@@ -207,6 +207,11 @@ class TestPreprocessing(unittest.TestCase):
         from src.query_ast import LogicalExpression
         self.assertTrue(isinstance(parsed_logical, LogicalExpression))
         self.assertEqual(parsed_logical.operator, "AND")
+
+        parsed_not = parser.parse("NOT year == 2020 OR category == 'tech'")
+        self.assertEqual(parsed_not.operator, "OR")
+        self.assertEqual(parsed_not.left.__class__.__name__, "NotExpression")
+        self.assertEqual(parsed_not.right.__class__.__name__, "FilterExpression")
         
         print(f"[OK] Filter parsing working")
         
@@ -312,7 +317,27 @@ class TestMetadataFiltering(unittest.TestCase):
             self.assertEqual(len(results), 2)
             self.assertIn("doc_1", results)
             self.assertIn("doc_3", results)
+
+            index_results = db.get_all_doc_indices_matching_filter(("year", "==", 2020))
+            self.assertEqual(index_results, {0, 2})
             print(f"[OK] Metadata filtering working: {results}")
+
+    def test_structured_metadata_filtering(self):
+        """Test structured metadata filtering without expression parsing"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = CorpusDBHelper(db_path)
+            db.init_db()
+            db.insert_documents(self.test_docs)
+
+            results = db.get_all_doc_indices_for_structured_filters(
+                year_range=(2020, 2020),
+                categories=["tech"],
+                has_title=True,
+                has_code=False,
+            )
+            self.assertEqual(results, {0})
 
 class TestEndToEnd(unittest.TestCase):
     """End-to-end integration tests"""

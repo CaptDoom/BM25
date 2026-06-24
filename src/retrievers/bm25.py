@@ -212,6 +212,8 @@ class CppBM25Engine:
                 ctypes.POINTER(ctypes.c_char_p),   # filter_names
                 ctypes.c_int,                      # num_filters
                 ctypes.c_int,                      # top_k
+                ctypes.c_void_p,                   # doc_mask_data
+                ctypes.c_int,                      # doc_mask_size
                 ctypes.POINTER(ctypes.c_int),      # out_doc_ids
                 ctypes.POINTER(ctypes.c_float)     # out_scores
             ]
@@ -250,7 +252,7 @@ class CppBM25Engine:
             return False
 
             
-    def search(self, query_term_ids, filter_names, top_k):
+    def search(self, query_term_ids, filter_names, top_k, doc_mask_buffer=None, doc_mask_size=0):
         if not self.lib or not self.engine_ptr:
             return []
             
@@ -272,6 +274,8 @@ class CppBM25Engine:
                 filter_names_arr,
                 num_filters,
                 top_k,
+                doc_mask_buffer,
+                doc_mask_size,
                 out_doc_ids,
                 out_scores
             )
@@ -297,6 +301,7 @@ class BM25Index:
         self.b = b
         self.retriever = None
         self.doc_ids = []
+        self.doc_id_to_idx = {}
         self.doc_lengths = None
         self.vocab = {}
         self.cpp_engine = None
@@ -314,6 +319,7 @@ class BM25Index:
             
         corpus_tokens = [tokenize_text(t) for t in texts]
         self.doc_lengths = np.array([len(tokens) for tokens in corpus_tokens], dtype=np.int32)
+        self.doc_id_to_idx = {doc_id: idx for idx, doc_id in enumerate(self.doc_ids)}
         
         self.retriever = bm25s.BM25(k1=self.k1, b=self.b, corpus=self.doc_ids)
         self.retriever.index(corpus_tokens)
@@ -354,18 +360,43 @@ class BM25Index:
         top_k = min(top_k, num_docs)
         if top_k <= 0:
             return []
+
+        doc_mask = self._normalize_doc_mask(doc_mask)
+        if doc_mask is not None and len(doc_mask) == 0:
+            return []
+
+        doc_mask_buffer = None
+        doc_mask_size = 0
+        if doc_mask is not None and pyroaring is not None:
+            doc_mask_bitmap = pyroaring.BitMap(sorted(doc_mask))
+            doc_mask_bytes = doc_mask_bitmap.serialize()
+            if doc_mask_bytes:
+                doc_mask_buffer = ctypes.create_string_buffer(doc_mask_bytes)
+                doc_mask_size = len(doc_mask_bytes)
+            else:
+                return []
             
         # Try to use C++ engine
-        if self.cpp_engine is not None and not doc_mask:
+        if self.cpp_engine is not None:
             query_term_ids = [self.vocab[tok] for tok in query_tokens if tok in self.vocab]
             if not query_term_ids:
                 return []
-            cpp_res = self.cpp_engine.search(query_term_ids, filter_names or [], top_k)
-            out = []
-            for doc_idx, score in cpp_res:
-                if 0 <= doc_idx < len(self.doc_ids):
-                    out.append((self.doc_ids[doc_idx], float(score)))
-            return out
+            if doc_mask is not None and pyroaring is None:
+                # Fall back to Python if we cannot serialize the metadata mask.
+                pass
+            else:
+                cpp_res = self.cpp_engine.search(
+                    query_term_ids,
+                    filter_names or [],
+                    top_k,
+                    ctypes.cast(doc_mask_buffer, ctypes.c_void_p) if doc_mask_buffer is not None else None,
+                    doc_mask_size,
+                )
+                out = []
+                for doc_idx, score in cpp_res:
+                    if 0 <= doc_idx < len(self.doc_ids):
+                        out.append((self.doc_ids[doc_idx], float(score)))
+                return out
             
         # Fallback to Python filtering
         if filter_names:
@@ -386,14 +417,7 @@ class BM25Index:
                 
             allowed_indices = set(allowed_set)
             if doc_mask is not None:
-                doc_mask_indices = set()
-                first_elem = next(iter(doc_mask)) if len(doc_mask) > 0 else None
-                if first_elem is not None and isinstance(first_elem, (int, np.integer)):
-                    doc_mask_indices = set(doc_mask)
-                else:
-                    doc_id_to_idx = {doc_id: idx for idx, doc_id in enumerate(self.doc_ids)}
-                    doc_mask_indices = {doc_id_to_idx[d] for d in doc_mask if d in doc_id_to_idx}
-                doc_mask = allowed_indices & doc_mask_indices
+                doc_mask = allowed_indices & doc_mask
             else:
                 doc_mask = allowed_indices
 
@@ -408,12 +432,10 @@ class BM25Index:
                     is_int_mask = True
                     
             if is_int_mask:
-                indices = list(doc_mask)
-                indices = [idx for idx in indices if 0 <= idx < num_docs]
+                indices = [idx for idx in doc_mask if 0 <= idx < num_docs]
                 weight_mask[indices] = 1.0
             else:
-                doc_id_to_idx = {doc_id: idx for idx, doc_id in enumerate(self.doc_ids)}
-                indices = [doc_id_to_idx[doc_id] for doc_id in doc_mask if doc_id in doc_id_to_idx]
+                indices = [self.doc_id_to_idx[doc_id] for doc_id in doc_mask if doc_id in self.doc_id_to_idx]
                 weight_mask[indices] = 1.0
                 
         results = self.retriever.retrieve([query_tokens], k=top_k, weight_mask=weight_mask)
@@ -427,6 +449,26 @@ class BM25Index:
                         doc_id = str(doc)
                     out.append((doc_id, float(score)))
         return out
+
+    def _normalize_doc_mask(self, doc_mask):
+        if doc_mask is None:
+            return None
+        if isinstance(doc_mask, np.ndarray):
+            if doc_mask.size == 0:
+                return set()
+            if np.issubdtype(doc_mask.dtype, np.integer):
+                return {int(idx) for idx in doc_mask.tolist()}
+            return {int(idx) for idx in doc_mask.tolist() if isinstance(idx, (int, np.integer))}
+
+        if isinstance(doc_mask, (set, frozenset, list, tuple)):
+            if not doc_mask:
+                return set()
+            first_elem = next(iter(doc_mask))
+            if isinstance(first_elem, (int, np.integer)):
+                return {int(idx) for idx in doc_mask if isinstance(idx, (int, np.integer))}
+            return {self.doc_id_to_idx[doc_id] for doc_id in doc_mask if doc_id in self.doc_id_to_idx}
+
+        return None
 
     def save(self, path):
         import shutil
@@ -520,8 +562,14 @@ class BM25Index:
             self.doc_ids = meta["doc_ids"]
             self.doc_lengths = meta["doc_lengths"]
         else:
-            self.doc_ids = [doc['text'] for doc in self.retriever.corpus]
+            self.doc_ids = []
+            for idx, doc in enumerate(self.retriever.corpus):
+                if isinstance(doc, dict):
+                    self.doc_ids.append(str(doc.get("_id", doc.get("id", idx))))
+                else:
+                    self.doc_ids.append(str(idx))
             self.doc_lengths = np.ones(len(self.doc_ids), dtype=np.int32) * 100
+        self.doc_id_to_idx = {doc_id: idx for idx, doc_id in enumerate(self.doc_ids)}
             
         # Ensure metadata and bitmaps exist
         metadata_bin = os.path.join(path, "doc_metadata.bin")

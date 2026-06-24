@@ -414,6 +414,7 @@ DATASET_INFO = {
     }
 }
 
+
 # Main Header
 st.markdown("""
     <div class="app-header">
@@ -438,8 +439,54 @@ with st.sidebar:
     st.markdown(f"**Notes:** {dataset_info['notes']}")
     st.markdown("---")
 
-    meta_filter = st.text_input("Metadata Filter Expression", placeholder="e.g. year == 2020", disabled=st.session_state.downloading)
-    meta_filter = meta_filter.strip() if meta_filter else None
+    st.markdown("### Metadata Filters")
+    st.caption("Structured filters are applied before BM25 scoring and before reranking.")
+
+    year_range = st.slider(
+        "Year range",
+        min_value=1900,
+        max_value=datetime.now().year,
+        value=(1900, datetime.now().year),
+        disabled=st.session_state.downloading,
+    )
+    selected_categories = st.multiselect(
+        "Category presets",
+        options=["tech", "science", "finance", "health", "sports", "education", "other"],
+        default=[],
+        disabled=st.session_state.downloading,
+        help="Use this if your corpus stores a category field with common labels.",
+    )
+    has_title_choice = st.selectbox(
+        "Title presence",
+        options=["Any", "Has title", "No title"],
+        disabled=st.session_state.downloading,
+    )
+    has_code_choice = st.selectbox(
+        "Code presence",
+        options=["Any", "Has code", "No code"],
+        disabled=st.session_state.downloading,
+    )
+
+    structured_filters = []
+    if year_range[0] != 1900 or year_range[1] != datetime.now().year:
+        structured_filters.append(("year_range", (int(year_range[0]), int(year_range[1]))))
+    if selected_categories:
+        structured_filters.append(("categories", tuple(selected_categories)))
+    if has_title_choice == "Has title":
+        structured_filters.append(("has_title", True))
+    elif has_title_choice == "No title":
+        structured_filters.append(("has_title", False))
+    if has_code_choice == "Has code":
+        structured_filters.append(("has_code", True))
+    elif has_code_choice == "No code":
+        structured_filters.append(("has_code", False))
+
+    if structured_filters:
+        st.write("Active filters:")
+        for key, value in structured_filters:
+            st.code(f"{key}: {value}", language="text")
+    else:
+        st.caption("No metadata filter applied.")
     
     st.markdown("---")
     st.markdown("### Performance Tuning")
@@ -637,7 +684,7 @@ if query_str:
         try:
             results = pipeline.search(
                 query_str, 
-                metadata_filter=meta_filter, 
+                structured_filters=tuple(structured_filters) if structured_filters else None,
                 top_k=top_k, 
                 use_reranker=use_reranker, 
                 correct_spelling=correct_spelling
