@@ -193,6 +193,8 @@ extern "C" {
         const char** filter_names,
         int num_filters,
         int top_k,
+        const void* doc_mask_data,
+        int doc_mask_size,
         int* out_doc_ids,
         float* out_scores
     ) {
@@ -201,6 +203,17 @@ extern "C" {
         
         roaring_bitmap_t* allowed_set = nullptr;
         bool has_filters = (num_filters > 0 && filter_names != nullptr);
+        roaring_bitmap_t* doc_mask_set = nullptr;
+
+        if (doc_mask_data != nullptr && doc_mask_size > 0) {
+            doc_mask_set = roaring_bitmap_portable_deserialize_safe(
+                reinterpret_cast<const char*>(doc_mask_data),
+                static_cast<size_t>(doc_mask_size)
+            );
+            if (doc_mask_set == nullptr) {
+                return 0;
+            }
+        }
         
         if (has_filters) {
             for (int i = 0; i < num_filters; ++i) {
@@ -218,18 +231,33 @@ extern "C" {
                 }
             }
             if (allowed_set == nullptr) {
-                return 0;
+                allowed_set = doc_mask_set ? roaring_bitmap_copy(doc_mask_set) : nullptr;
+            }
+        }
+
+        if (doc_mask_set != nullptr) {
+            if (allowed_set == nullptr) {
+                allowed_set = roaring_bitmap_copy(doc_mask_set);
+            } else {
+                roaring_bitmap_and_inplace(allowed_set, doc_mask_set);
             }
         }
         
-        if (has_filters && roaring_bitmap_is_empty(allowed_set)) {
+        if (has_filters && allowed_set != nullptr && roaring_bitmap_is_empty(allowed_set)) {
             roaring_bitmap_free(allowed_set);
+            if (doc_mask_set) roaring_bitmap_free(doc_mask_set);
+            return 0;
+        }
+
+        if (allowed_set != nullptr && roaring_bitmap_is_empty(allowed_set)) {
+            roaring_bitmap_free(allowed_set);
+            if (doc_mask_set) roaring_bitmap_free(doc_mask_set);
             return 0;
         }
         
         std::vector<uint32_t> allowed_docs;
         uint64_t allowed_size = 0;
-        if (has_filters) {
+        if (allowed_set != nullptr) {
             allowed_size = roaring_bitmap_get_cardinality(allowed_set);
             allowed_docs.resize(allowed_size);
             roaring_bitmap_to_uint32_array(allowed_set, allowed_docs.data());
@@ -307,6 +335,7 @@ extern "C" {
         int num_scored = dirty_docs.size();
         if (num_scored == 0) {
             if (allowed_set) roaring_bitmap_free(allowed_set);
+            if (doc_mask_set) roaring_bitmap_free(doc_mask_set);
             return 0;
         }
         
@@ -336,6 +365,9 @@ extern "C" {
         
         if (allowed_set) {
             roaring_bitmap_free(allowed_set);
+        }
+        if (doc_mask_set) {
+            roaring_bitmap_free(doc_mask_set);
         }
         
         return return_count;

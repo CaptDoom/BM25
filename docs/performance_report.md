@@ -1,29 +1,57 @@
-# Performance Comparison Report: Old vs. New Pipeline
+# Retrieval Pipeline Performance Report
 
-We compare the performance of the **Old BM25 Retrieval Engine** and the upgraded **AuraAI Scalable Hybrid Retrieval Pipeline** on the **BEIR/FEVER** dataset.
+This report summarizes the current sparse retrieval pipeline and the effect of the metadata-filtering changes.
 
-## Benchmark Metrics
+## Current Pipeline
 
-| Metric / Parameter | Old Pipeline (BM25 only) | New Pipeline (BM25 + FAISS + RRF + Cross-Encoder) |
-| --- | --- | --- |
-| **Indexing Time** | ~5 minutes | ~12 minutes (including dense embedding generation) |
-| **RAM Footprint (Indexing)** | ~4-6 GB | **< 3 GB** (sharded vector writing, SQLite batched writes) |
-| **RAM Footprint (Search)** | ~4 GB | **< 2 GB** (FAISS memory-mapping, SQLite key-value lookup) |
-| **Search Query Latency (p50)** | ~50 ms | **~15 ms** (early terminated scoring, FAISS FlatL2 CPU search) |
-| **Search Query Latency (p95)** | ~120 ms | **~45 ms** (including RRF and Cross-Encoder batch inference) |
-| **Precision @ 5** | 0.1063 | **0.1063** (Maintained baseline quality) |
-| **Recall @ 5** | 0.4918 | **0.4918** (Maintained baseline quality) |
-| **NDCG @ 5** | 0.3952 | **0.3952** (Maintained baseline quality) |
-| **Dynamic Dataset Loading** | Hardcoded (FEVER only) | **Dynamic** (supports Scidocs, Fever, FiQA, Quora, MS MARCO) |
-| **Metadata Filtering** | Unsupported | **Supported** (Pre-retrieval SQLite-based evaluation) |
-| **Spelling Correction** | Unsupported | **Supported** (RapidFuzz corpus-aware spelling check) |
+The retrieval flow is:
 
-## Performance and Scalability Summary
+1. Parse the user query.
+2. Resolve any structured sidebar metadata filters directly in SQLite.
+3. Convert the resolved doc set into a compact bitmap and hand it to the C++ BM25 scorer.
+4. Apply optional embedded bitmap filters from the query syntax.
+5. Run BM25 scoring on the restricted candidate set.
+6. Optionally rerank the top candidates.
+7. Hydrate only the final documents from SQLite.
 
-1. **Memory Efficiency**:
-   - The old pipeline loaded all sparse shards directly in RAM for full scoring.
-   - The new pipeline uses SQLite key-value disk lookup for document retrieval, FAISS memory-mapped files (`faiss.IO_FLAG_MMAP`) for vector indices, and early-termination posting list scans, allowing indexing and searching multi-million document corpora on 16GB RAM CPU systems.
-   
-2. **Speed & Latency**:
-   - Query latency was significantly improved by using stacked CSR matrix multiplication and vector operations.
-   - Cross-encoder reranking runs in mini-batches of size 32, ensuring sub-100ms inference times.
+## What Metadata Filtering Changes
+
+Metadata filtering now acts as an early candidate-reduction step instead of a post-processing step.
+
+- Filters are parsed into an AST.
+- Structured sidebar controls are resolved directly in SQLite before scoring.
+- The pipeline passes doc indices downstream, then serializes them into a bitmap for the C++ scorer.
+- Repeated identical filters are cached per pipeline instance.
+- The sidebar now builds structured filter payloads from controls, which reduces syntax mistakes and speeds up common filtering tasks.
+
+## Performance Impact
+
+The main performance benefit is lower work per query.
+
+- Selective filters reduce the number of documents that BM25 needs to score.
+- The C++ scorer now receives the metadata mask directly, so it can skip non-matching documents without bouncing back to Python.
+- Reranking receives a smaller candidate pool, which matters because the reranker is the most expensive stage.
+- Document hydration only happens for the final results, which keeps SQLite lookups bounded.
+- `has_title` is filtered on the title column directly, which avoids relying on metadata JSON for a derived property.
+
+## Correctness Impact
+
+- `NOT` now obeys operator precedence correctly.
+- Parenthesized expressions are preserved.
+- The SQLite metadata path and the BM25 fallback path now agree on the filter result set.
+- Structured sidebar controls generate valid structured filters for the common metadata cases.
+
+## Tradeoffs
+
+- Filtering is fastest when the filter is selective.
+- Very broad filters behave close to the no-filter case, with a small extra cost for resolving the metadata set.
+- Cache reuse improves repeated searches with the same filter, but it assumes the corpus is stable for the lifetime of the pipeline object.
+
+## Practical Outcome
+
+The pipeline is now more predictable and cheaper to run:
+
+- less unnecessary scoring,
+- less reranker load,
+- less repeated metadata work,
+- and cleaner separation between filtering, ranking, and hydration.

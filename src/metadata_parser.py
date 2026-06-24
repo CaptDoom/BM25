@@ -35,13 +35,11 @@ class MetadataParser:
             return None
             
         filter_str = filter_str.strip()
-        
-        # Handle NOT keyword/operator
-        if filter_str.upper().startswith("NOT "):
-            operand = self.parse(filter_str[4:])
-            return NotExpression(operand) if operand else None
+
+        # Remove a single set of outer parentheses before applying precedence rules.
+        filter_str = self._strip_outer_parens(filter_str)
             
-        # Parse logical OR/AND operators outside brackets
+        # Parse logical operators by precedence: OR -> AND -> NOT -> atomic expression.
         or_split = self._split_by_operator_outside_parens(filter_str, "OR")
         if or_split:
             left_ast = self.parse(or_split[0])
@@ -53,13 +51,12 @@ class MetadataParser:
             left_ast = self.parse(and_split[0])
             right_ast = self.parse(and_split[1])
             return LogicalExpression("AND", left_ast, right_ast)
+
+        not_match = re.match(r"^NOT\s+(.+)$", filter_str, flags=re.IGNORECASE)
+        if not_match:
+            operand = self.parse(not_match.group(1))
+            return NotExpression(operand) if operand else None
             
-        # Unwrap outer parentheses if any
-        if filter_str.startswith("(") and filter_str.endswith(")"):
-            inner = filter_str[1:-1].strip()
-            if self._check_parens_balance(inner):
-                return self.parse(inner)
-                
         # Parse basic expressions: field op val
         match = re.match(r"^(\w+)\s*(==|!=|>=|<=|>|<)\s*(.+)$", filter_str)
         if not match:
@@ -69,6 +66,13 @@ class MetadataParser:
         val = val.strip().strip("'\"")
         typed_val = self.validate_type(field, val)
         return FilterExpression(field, op, typed_val)
+
+    def _strip_outer_parens(self, s: str) -> str:
+        if s.startswith("(") and s.endswith(")"):
+            inner = s[1:-1].strip()
+            if inner and self._check_parens_balance(inner):
+                return inner
+        return s
 
     def _check_parens_balance(self, s: str) -> bool:
         balance = 0
